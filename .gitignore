@@ -1,0 +1,5 @@
+node_modules/
+.pw-browsers/
+test-results/
+.DS_Store
+*.log
