@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>논문 정리</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <button class="icon-btn" id="sidebarToggle" title="메뉴 열고 닫기" aria-label="메뉴">☰</button>
+  <h1>논문 정리</h1>
+  <input id="search" type="search" placeholder="제목 · 저자 · 메모 찾기" autocomplete="off">
+  <nav class="views" role="tablist" aria-label="보기">
+    <button role="tab" data-view="board" aria-selected="true">보드</button>
+    <button role="tab" data-view="tree">트리</button>
+    <button role="tab" data-view="graph">그래프</button>
+  </nav>
+  <label class="btn primary upload">PDF 올리기<input id="fileInput" type="file" accept="application/pdf,.pdf" multiple hidden></label>
+  <button class="btn" id="logout" title="이 기기에서 로그아웃">로그아웃</button>
+</header>
+
+<div class="layout">
+  <aside id="sidebar">
+    <section>
+      <div class="sec-head"><h2>체크 메뉴</h2><button class="add" data-add="checks" title="체크 메뉴 만들기">＋</button></div>
+      <ul id="checkList" class="facet"></ul>
+    </section>
+    <section>
+      <div class="sec-head"><h2>주제 라벨</h2><button class="add" data-add="labels" title="라벨 만들기">＋</button></div>
+      <ul id="labelList" class="facet"></ul>
+    </section>
+    <section>
+      <div class="sec-head"><h2>그룹</h2><button class="add" data-add="groups" title="그룹 만들기">＋</button></div>
+      <ul id="groupList" class="facet groups"></ul>
+    </section>
+    <p class="hint">논문을 다른 논문 위에 놓으면 연결돼요. 그룹 위에 놓으면 그 그룹으로 들어가요.</p>
+  </aside>
+
+  <main id="main">
+    <div id="filterBar" class="filter-bar" hidden></div>
+    <div id="board" class="view board" data-view="board">
+      <div class="board-inner"><svg class="board-links"></svg></div>
+      <div class="board-tools" role="toolbar" aria-label="보드 확대">
+        <button class="btn" id="zoomOut" title="축소" aria-label="축소">−</button>
+        <span id="zoomPct" class="zoom-pct" aria-live="polite">100%</span>
+        <button class="btn" id="zoomIn" title="확대" aria-label="확대">+</button>
+        <button class="btn" id="zoomReset" title="100% 로">원래 크기</button>
+        <button class="btn" id="zoomFit" title="모든 논문이 보이게">전체 보기</button>
+      </div>
+      <div id="selInfo" class="sel-info" hidden></div>
+    </div>
+    <div id="tree" class="view tree" data-view="tree" hidden></div>
+    <div id="graph" class="view graph" data-view="graph" hidden><svg></svg><div class="graph-tools"><button class="btn" id="graphFit">화면에 맞추기</button><label><input type="checkbox" id="graphGroups" checked> 그룹 색</label></div></div>
+    <div id="empty" class="empty" hidden>
+      <div class="empty-icon">📄</div>
+      <p><b>PDF 를 여기에 끌어다 놓으세요</b></p>
+      <p>제목 · 주저자 · 년도를 알아서 읽어요. 틀리면 눌러서 고치면 돼요.</p>
+      <label class="btn primary">PDF 고르기<input type="file" accept="application/pdf,.pdf" multiple hidden class="file-alt"></label>
+    </div>
+  </main>
+</div>
+
+<div id="dropShade" class="drop-shade" hidden><div>여기에 놓으면 올라가요 · 논문 위에 놓으면 그 논문과 연결돼요</div></div>
+<div id="popover" class="popover" hidden></div>
+<div id="viewer" class="viewer" hidden></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="offline" class="offline" hidden>서버에 닿지 않아요 — 맥 미니가 켜져 있는지, 테일스케일이 연결됐는지 봐 주세요. 그동안 고친 것은 저장되지 않아요.</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
