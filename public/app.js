@@ -19,6 +19,7 @@ const otherEnd = (l, id) => (l.a === id ? l.b : l.a);
 const label = (id) => S.db.labels.find((x) => x.id === id);
 const check = (id) => S.db.checks.find((x) => x.id === id);
 const group = (id) => S.db.groups.find((x) => x.id === id);
+const group_ = group;
 const short = (s, n = 40) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s || '');
 const metaLine = (p) => [p.author || '저자 모름', p.year || '년도 모름'].join(' · ');
 
@@ -257,13 +258,14 @@ function markTarget(t) {
   t.el.classList.add(t.kind === 'paper' ? 'drop-target' : t.el.matches('.facet li') ? 'drop-ok' : 'drop-target');
 }
 
-function draggable(el, paperId, { onStart, onMove, onEnd, onClick, ghost = true } = {}) {
+function draggable(el, paperId, { onStart, onMove, onEnd, onClick, onDrop, accept, ghost = true } = {}) {
   el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || e.target.closest('button,input,textarea,a')) return;
     const sx = e.clientX, sy = e.clientY;
     const downTarget = e.target; // 포인터 캡처 뒤에는 이벤트 target 이 el 로 바뀌므로 눌린 곳을 따로 기억
     let dragging = false, gh = null, target = null;
     el.setPointerCapture(e.pointerId);
+    let others = [];
     const move = (ev) => {
       const dx = ev.clientX - sx, dy = ev.clientY - sy;
       if (!dragging && Math.hypot(dx, dy) < 5) return;
@@ -272,7 +274,8 @@ function draggable(el, paperId, { onStart, onMove, onEnd, onClick, ghost = true 
         closePopover(true);
         el.classList.add('dragging');
         el.style.pointerEvents = 'none';
-        onStart?.();
+        others = onStart?.() || []; // 같이 끌리는 요소들 — 놓을 곳 판정에서 빼려고 투명하게
+        for (const o of others) o.style.pointerEvents = 'none';
         if (ghost) {
           const p = byId(paperId);
           gh = h('div', { class: 'ghost' }, '📄 ' + short(p?.title, 40));
@@ -282,6 +285,7 @@ function draggable(el, paperId, { onStart, onMove, onEnd, onClick, ghost = true 
       if (gh) { gh.style.left = ev.clientX + 12 + 'px'; gh.style.top = ev.clientY + 10 + 'px'; }
       onMove?.(dx, dy, ev);
       target = dropTargetAt(ev.clientX, ev.clientY, paperId);
+      if (target && accept && !accept(target)) target = null;
       markTarget(target);
     };
     const up = async (ev) => {
@@ -289,11 +293,12 @@ function draggable(el, paperId, { onStart, onMove, onEnd, onClick, ghost = true 
       el.removeEventListener('pointerup', up);
       el.removeEventListener('pointercancel', up);
       el.style.pointerEvents = '';
+      for (const o of others) o.style.pointerEvents = '';
       el.classList.remove('dragging');
       gh?.remove();
       markTarget(null);
       if (!dragging) return ev.type === 'pointerup' && onClick?.(ev, downTarget);
-      const handled = ev.type === 'pointerup' && target ? await dropPaperOn(paperId, target) : false;
+      const handled = ev.type === 'pointerup' && target ? await (onDrop ? onDrop(target) : dropPaperOn(paperId, target)) : false;
       onEnd?.(handled, ev);
     };
     el.addEventListener('pointermove', move);
@@ -361,47 +366,266 @@ function freeSlot(taken) {
   return { x: 40, y: 40 };
 }
 
+// 보드 확대 · 이동: .board-inner 에 translate + scale. 논문 좌표(pos)는 확대와 상관없는 보드 좌표.
+const Z = { k: 1, tx: 0, ty: 0, ...JSON.parse(localStorage.getItem('po.boardZoom') || '{}') };
+const ZMIN = 0.2, ZMAX = 3;
+S.sel = new Set(); // 여러 개 선택 (보드)
+
+function applyBoardZoom(save = true) {
+  const inner = $('#board .board-inner');
+  inner.style.transform = `translate(${Z.tx}px, ${Z.ty}px) scale(${Z.k})`;
+  const bd = $('#board');
+  bd.style.backgroundSize = `${24 * Z.k}px ${24 * Z.k}px`;
+  bd.style.backgroundPosition = `${Z.tx}px ${Z.ty}px`;
+  $('#zoomPct').textContent = Math.round(Z.k * 100) + '%';
+  if (save) saveZoomSoon();
+}
+const saveZoomSoon = debounce(() => localStorage.setItem('po.boardZoom', JSON.stringify(Z)), 300);
+// 화면 좌표 → 보드 좌표
+function toBoard(clientX, clientY) {
+  const r = $('#board').getBoundingClientRect();
+  return { x: (clientX - r.left - Z.tx) / Z.k, y: (clientY - r.top - Z.ty) / Z.k };
+}
+// 화면의 (cx, cy) 지점을 붙잡은 채로 배율 바꾸기
+function zoomAt(cx, cy, k) {
+  const r = $('#board').getBoundingClientRect();
+  const nk = clamp(k, ZMIN, ZMAX);
+  const mx = cx - r.left, my = cy - r.top;
+  Z.tx = mx - ((mx - Z.tx) * nk) / Z.k;
+  Z.ty = my - ((my - Z.ty) * nk) / Z.k;
+  Z.k = nk;
+  applyBoardZoom();
+}
+function zoomCenter(k) {
+  const r = $('#board').getBoundingClientRect();
+  zoomAt(r.left + r.width / 2, r.top + r.height / 2, k);
+}
+function fitBoard() {
+  const ps = S.db.papers.filter((p) => p.pos);
+  if (!ps.length) return;
+  const r = $('#board').getBoundingClientRect();
+  const x0 = Math.min(...ps.map((p) => p.pos.x)) - 40, y0 = Math.min(...ps.map((p) => p.pos.y)) - 40;
+  const x1 = Math.max(...ps.map((p) => p.pos.x)) + CARD_W + 40, y1 = Math.max(...ps.map((p) => p.pos.y)) + CARD_H + 40;
+  Z.k = clamp(Math.min(r.width / (x1 - x0), r.height / (y1 - y0)), ZMIN, 1.5);
+  Z.tx = (r.width - (x1 - x0) * Z.k) / 2 - x0 * Z.k;
+  Z.ty = (r.height - (y1 - y0) * Z.k) / 2 - y0 * Z.k;
+  applyBoardZoom();
+}
+
+function setSelection(ids) {
+  S.sel = new Set(ids);
+  for (const el of $$('#board .paper')) el.classList.toggle('picked', S.sel.has(el.dataset.paperId));
+  const n = S.sel.size;
+  const info = $('#selInfo');
+  info.hidden = n < 2;
+  info.textContent = `${n}편 선택 · 끌면 같이 움직여요 · Esc 로 풀기`;
+}
+
+function setupBoardControls() {
+  const bd = $('#board');
+  let space = false;
+  addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !e.target.closest('input,textarea,select,[contenteditable]') && S.view === 'board') {
+      if (!space) { space = true; bd.classList.add('pan-ready'); }
+      e.preventDefault();
+    }
+    if (e.key === 'Escape' && S.sel.size) setSelection([]);
+  });
+  addEventListener('keyup', (e) => { if (e.code === 'Space') { space = false; bd.classList.remove('pan-ready'); } });
+  addEventListener('blur', () => { space = false; bd.classList.remove('pan-ready'); });
+
+  // 휠: 트랙패드 핀치(ctrlKey) · 마우스 휠 = 커서 기준 확대/축소, 트랙패드 두 손가락 쓸기 = 이동
+  bd.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const mouseWheel = e.deltaMode === 1 || (e.deltaX === 0 && Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 50);
+    if (e.ctrlKey || e.metaKey || mouseWheel) {
+      const d = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      zoomAt(e.clientX, e.clientY, Z.k * Math.exp(-d * (e.ctrlKey ? 0.01 : 0.0015)));
+    } else {
+      Z.tx -= e.deltaX; Z.ty -= e.deltaY;
+      applyBoardZoom();
+    }
+  }, { passive: false });
+
+  // 빈 곳 누르기: 마우스 = 사각형 선택(스페이스 · 가운데 단추면 이동) · 손가락 하나 = 이동 · 둘 = 핀치
+  const touches = new Map();
+  let pinch = null;
+  bd.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.paper,.board-tools')) return;
+    if (e.pointerType === 'touch') {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        const [p1, p2] = [...touches.values()];
+        pinch = { d: Math.hypot(p1.x - p2.x, p1.y - p2.y), k: Z.k, cx: (p1.x + p2.x) / 2, cy: (p1.y + p2.y) / 2, tx: Z.tx, ty: Z.ty };
+        return;
+      }
+    }
+    const pan = e.pointerType === 'touch' || space || e.button === 1;
+    if (!pan && e.button !== 0) return;
+    e.preventDefault();
+    try {
+      bd.setPointerCapture(e.pointerId);
+    } catch (err) {
+      // 이미 끝난 포인터(빠른 탭)는 잡을 수 없음 — 잡지 못해도 아래 이동/선택은 그대로 동작
+      console.debug('[board] pointer capture 못 함', err.message);
+    }
+    closePopover(true);
+    const sx = e.clientX, sy = e.clientY, t0 = { tx: Z.tx, ty: Z.ty };
+    const base = e.shiftKey || e.metaKey || e.ctrlKey ? new Set(S.sel) : new Set();
+    let box = null, moved = false, pinched = false;
+    if (pan) bd.classList.add('panning');
+    const move = (ev) => {
+      if (ev.pointerType === 'touch') {
+        touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+        if (pinch && touches.size >= 2) {
+          pinched = true; // 핀치가 끝난 뒤 남은 손가락으로 화면이 튀지 않게
+          const [p1, p2] = [...touches.values()];
+          const d = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+          const cx = (p1.x + p2.x) / 2, cy = (p1.y + p2.y) / 2;
+          Z.tx = pinch.tx; Z.ty = pinch.ty; Z.k = pinch.k;
+          zoomAt(pinch.cx, pinch.cy, pinch.k * (d / pinch.d));
+          Z.tx += cx - pinch.cx; Z.ty += cy - pinch.cy;
+          applyBoardZoom();
+          return;
+        }
+      }
+      if (ev.pointerId !== e.pointerId) return;
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      if (!moved && Math.hypot(dx, dy) < 4) return;
+      moved = true;
+      if (pan) { if (!pinched) { Z.tx = t0.tx + dx; Z.ty = t0.ty + dy; applyBoardZoom(); } return; }
+      const r = bd.getBoundingClientRect();
+      const x0 = Math.min(sx, ev.clientX), y0 = Math.min(sy, ev.clientY), x1 = Math.max(sx, ev.clientX), y1 = Math.max(sy, ev.clientY);
+      if (!box) { box = h('div', { class: 'marquee' }); bd.append(box); document.body.classList.add('selecting'); }
+      Object.assign(box.style, { left: x0 - r.left + 'px', top: y0 - r.top + 'px', width: x1 - x0 + 'px', height: y1 - y0 + 'px' });
+      const ids = new Set(base);
+      for (const el of $$('#board .paper')) {
+        const c = el.getBoundingClientRect();
+        if (c.right > x0 && c.left < x1 && c.bottom > y0 && c.top < y1) ids.add(el.dataset.paperId);
+      }
+      setSelection(ids);
+    };
+    const up = (ev) => {
+      if (ev.pointerType === 'touch') { touches.delete(ev.pointerId); if (touches.size < 2) pinch = null; }
+      if (ev.pointerId !== e.pointerId) return;
+      bd.removeEventListener('pointermove', move);
+      bd.removeEventListener('pointerup', up);
+      bd.removeEventListener('pointercancel', up);
+      bd.classList.remove('panning');
+      box?.remove();
+      document.body.classList.remove('selecting');
+      if (!moved && !pan && !base.size) setSelection([]); // 빈 곳 클릭 = 선택 풀기
+    };
+    bd.addEventListener('pointermove', move);
+    bd.addEventListener('pointerup', up);
+    bd.addEventListener('pointercancel', up);
+  });
+  // 둘째 손가락은 첫 손가락의 move 처리기에서 같이 다룸
+  bd.addEventListener('pointermove', (e) => { if (e.pointerType === 'touch' && touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY }); });
+  bd.addEventListener('pointerup', (e) => { if (e.pointerType === 'touch') { touches.delete(e.pointerId); if (touches.size < 2) pinch = null; } });
+
+  $('#zoomOut').onclick = () => zoomCenter(Z.k / 1.25);
+  $('#zoomIn').onclick = () => zoomCenter(Z.k * 1.25);
+  $('#zoomReset').onclick = () => zoomCenter(1);
+  $('#zoomFit').onclick = fitBoard;
+  applyBoardZoom(false);
+}
+
+async function savePositions(items) {
+  if (!items.length) return;
+  for (const { p, pos } of items) p.pos = pos;
+  await api('POST', '/api/papers/positions', { items: items.map(({ p, pos }) => ({ id: p.id, pos })) });
+}
+
 function renderBoard() {
   const inner = $('#board .board-inner');
   const svg = $('.board-links', inner);
   $$('.paper', inner).forEach((e) => e.remove());
   const taken = S.db.papers.filter((p) => p.pos).map((p) => p.pos);
+  const placed = [];
   for (const p of S.db.papers) {
     if (!p.pos) {
       p.pos = freeSlot(taken);
       taken.push(p.pos);
-      api('PATCH', '/api/papers/' + p.id, { pos: p.pos, needsReview: p.needsReview }).catch(fail);
+      placed.push({ p, pos: p.pos });
     }
   }
-  let maxX = 1600, maxY = 1200;
+  savePositions(placed).catch(fail);
+  for (const id of [...S.sel]) if (!byId(id)) S.sel.delete(id);
   for (const p of S.db.papers) {
     const el = paperCard(p);
     el.style.left = p.pos.x + 'px';
     el.style.top = p.pos.y + 'px';
     if (filtering() && !matches(p)) el.classList.add('dim');
-    maxX = Math.max(maxX, p.pos.x + 600); maxY = Math.max(maxY, p.pos.y + 600);
+    if (S.sel.has(p.id)) el.classList.add('picked');
     hoverPeek(el, p.id);
-    const start = { ...p.pos };
+    let group = []; // 같이 끌리는 논문: [{ p, el, start }]
     draggable(el, p.id, {
       ghost: false,
+      onStart: () => {
+        if (!S.sel.has(p.id)) setSelection([]); // 선택 밖의 논문을 끌면 그것 하나만
+        const ids = S.sel.size > 1 ? [...S.sel] : [p.id];
+        group = ids.map((id) => ({ p: byId(id), el: $(`#board .paper[data-paper-id="${id}"]`), start: { ...byId(id).pos } })).filter((g) => g.p && g.el);
+        for (const g of group) g.el.classList.add('dragging');
+        return group.map((g) => g.el).filter((x) => x !== el);
+      },
       onMove: (dx, dy) => {
-        el.style.left = Math.max(0, start.x + dx) + 'px';
-        el.style.top = Math.max(0, start.y + dy) + 'px';
-        drawBoardLinks(svg, { [p.id]: { x: Math.max(0, start.x + dx), y: Math.max(0, start.y + dy) } });
+        const over = {};
+        for (const g of group) {
+          const x = Math.max(0, g.start.x + dx / Z.k), y = Math.max(0, g.start.y + dy / Z.k);
+          g.el.style.left = x + 'px';
+          g.el.style.top = y + 'px';
+          over[g.p.id] = { x, y };
+        }
+        drawBoardLinks(svg, over);
+      },
+      // 여러 개를 끌 때는 다른 논문 위에 놓아도 링크를 만들지 않음 — 그냥 그 자리로 옮김
+      accept: (t) => !(group.length > 1 && t.kind === 'paper'),
+      onDrop: async (t) => {
+        if (group.length <= 1) return dropPaperOn(p.id, t);
+        try {
+          const ps = group.map((g) => g.p);
+          if (t.kind === 'group') {
+            await Promise.all(ps.map((q) => savePaper(q, { groupId: t.id })));
+            toast(`${ps.length}편 → ${t.id ? group_(t.id)?.name : '그룹 없음'}`);
+          } else if (t.kind === 'label') {
+            await Promise.all(ps.filter((q) => !q.labels.includes(t.id)).map((q) => savePaper(q, { labels: [...q.labels, t.id] })));
+            toast(`${ps.length}편에 라벨 「${label(t.id)?.name}」 붙였어요`);
+          } else if (t.kind === 'check') {
+            await Promise.all(ps.filter((q) => !q.checks.includes(t.id)).map((q) => savePaper(q, { checks: [...q.checks, t.id] })));
+            toast(`${ps.length}편을 ${check(t.id)?.icon} ${check(t.id)?.name} 에 넣었어요`);
+          }
+          render();
+        } catch (e) {
+          fail(e);
+        }
+        return true;
       },
       onEnd: async (handled) => {
-        if (handled) { el.style.left = start.x + 'px'; el.style.top = start.y + 'px'; drawBoardLinks(svg); return; }
-        const pos = { x: Math.round(parseFloat(el.style.left)), y: Math.round(parseFloat(el.style.top)) };
-        try { await savePaper(p, { pos, needsReview: p.needsReview }); start.x = pos.x; start.y = pos.y; } catch (e) { fail(e); }
+        for (const g of group) g.el.classList.remove('dragging');
+        if (handled) {
+          for (const g of group) { g.el.style.left = g.start.x + 'px'; g.el.style.top = g.start.y + 'px'; }
+          drawBoardLinks(svg);
+          return;
+        }
+        const items = group.map((g) => ({ p: g.p, pos: { x: Math.round(parseFloat(g.el.style.left)), y: Math.round(parseFloat(g.el.style.top)) } }));
+        try { await savePositions(items); } catch (e) { fail(e); }
         drawBoardLinks(svg);
       },
-      onClick: () => openEditor(p.id, el),
+      onClick: (ev) => {
+        if (ev.shiftKey || ev.metaKey || ev.ctrlKey) {
+          const ids = new Set(S.sel);
+          ids.has(p.id) ? ids.delete(p.id) : ids.add(p.id);
+          return setSelection(ids);
+        }
+        setSelection([]);
+        openEditor(p.id, el);
+      },
     });
     inner.append(el);
   }
-  inner.style.width = maxX + 'px';
-  inner.style.height = maxY + 'px';
   drawBoardLinks(svg);
+  setSelection(S.sel);
 }
 function drawBoardLinks(svg, override = {}) {
   const pos = (id) => override[id] || byId(id)?.pos;
@@ -730,7 +954,7 @@ function hoverPeek(el, id) {
     peekTimer = setTimeout(() => {
       const pop = $('#popover');
       if (!pop.hidden && pop._owner !== 'peek') return; // 편집 중이면 미리보기 안 띄움
-      if (document.querySelector('.dragging')) return;
+      if (document.querySelector('.dragging') || document.body.classList.contains('selecting')) return;
       showPeek(id, el);
     }, 220);
   });
@@ -1064,8 +1288,8 @@ addEventListener('drop', async (e) => {
   const files = [...e.dataTransfer.files];
   let at = null;
   if (S.view === 'board' && !t) {
-    const r = $('#board .board-inner').getBoundingClientRect();
-    at = { x: Math.max(0, Math.round(e.clientX - r.left - CARD_W / 2)), y: Math.max(0, Math.round(e.clientY - r.top - CARD_H / 2)) };
+    const b = toBoard(e.clientX, e.clientY);
+    at = { x: Math.max(0, Math.round(b.x - CARD_W / 2)), y: Math.max(0, Math.round(b.y - CARD_H / 2)) };
   }
   await uploadFiles(files, { linkTo: t?.kind === 'paper' ? t.id : null, groupId: t?.kind === 'group' ? t.id : null, at });
 });
@@ -1143,6 +1367,7 @@ $('#sidebarToggle').onclick = () => {
 };
 addEventListener('resize', debounce(() => { if (S.view === 'graph') kick(.2); }, 200));
 setupGraphPanZoom();
+setupBoardControls();
 addEventListener('online', () => load().catch(fail));
 // 다른 기기에서 고친 것을 가끔 가져옴 (편집 중이 아닐 때만)
 setInterval(async () => {
@@ -1154,4 +1379,5 @@ setInterval(async () => {
 }, 15000);
 
 window.__po = S; // 시험용
+window.__board = Z; // 시험용
 load().catch((e) => { fail(e); $('#empty').hidden = false; });

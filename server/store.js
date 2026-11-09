@@ -128,6 +128,19 @@ export class Store {
     return p;
   }
 
+  setPositions(items) {
+    let n = 0;
+    for (const it of items) {
+      const p = this.paper(it?.id);
+      const x = Number(it?.pos?.x), y = Number(it?.pos?.y);
+      if (!p || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+      p.pos = { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) };
+      n++;
+    }
+    if (n) this.save();
+    return n;
+  }
+
   deletePaper(id) {
     const i = this.db.papers.findIndex((p) => p.id === id);
     if (i < 0) return false;

@@ -205,6 +205,172 @@ test('보드에서 빈 곳으로 끌면 자리 옮김(저장됨)', async () => {
   await shot('07-board');
 });
 
+const Zs = () => page.evaluate(() => ({ ...window.__board }));
+const idOf = async (title) => (await state()).papers.find((p) => p.title === title).id;
+async function boardAt(bx, by) {
+  // 보드 좌표 → 화면 좌표
+  return page.evaluate(([bx, by]) => {
+    const r = document.querySelector('#board').getBoundingClientRect();
+    const Z = window.__board;
+    return { x: r.left + Z.tx + bx * Z.k, y: r.top + Z.ty + by * Z.k };
+  }, [bx, by]);
+}
+
+test('보드 확대: 휠은 커서 자리를 붙잡고 확대 · 핀치(ctrl+휠) · 트랙패드 쓸기는 이동 · 원래 크기', async () => {
+  assert.equal(await page.innerText('#zoomPct'), '100%');
+  const sel = card('Contact Implicit Planning');
+  const c0 = await center(sel);
+  await page.mouse.move(c0.x, c0.y);
+  await page.mouse.wheel(0, -100); // 마우스 휠 한 칸
+  await page.waitForTimeout(100);
+  const z1 = await Zs();
+  assert.ok(z1.k > 1.1, '확대됨 ' + z1.k);
+  const c1 = await center(sel);
+  assert.ok(Math.abs(c1.x - c0.x) < 2 && Math.abs(c1.y - c0.y) < 2, '커서 밑의 논문은 제자리 ' + JSON.stringify([c0, c1]));
+  const box1 = await page.locator(sel).boundingBox();
+  assert.ok(Math.abs(box1.width - 132 * z1.k) < 2, '아이콘도 같이 커짐');
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, 30); // 트랙패드 핀치 = ctrl + 작은 휠
+  await page.keyboard.up('Control');
+  await page.waitForTimeout(100);
+  const z2 = await Zs();
+  assert.ok(z2.k < z1.k, '핀치로 축소 ' + z2.k);
+  // 트랙패드 두 손가락 쓸기(소수 delta) = 이동, 배율은 그대로
+  await page.evaluate(() => document.querySelector('#board').dispatchEvent(new WheelEvent('wheel', { deltaX: 15.5, deltaY: 7.25, clientX: 700, clientY: 400, bubbles: true, cancelable: true })));
+  const z3 = await Zs();
+  assert.equal(z3.k, z2.k);
+  assert.ok(Math.abs(z3.tx - (z2.tx - 15.5)) < 0.01 && Math.abs(z3.ty - (z2.ty - 7.25)) < 0.01);
+  assert.match(await page.innerText('#zoomPct'), /^\d+%$/);
+  await page.click('#zoomReset');
+  assert.equal(await page.innerText('#zoomPct'), '100%');
+});
+
+test('확대한 채로: 놓은 자리 · 옮긴 거리 · 논문 위 놓기(링크)가 맞음', async () => {
+  // 2배로
+  const r = await page.locator('#board').boundingBox();
+  await page.mouse.move(r.x + 300, r.y + 200);
+  for (let i = 0; i < 5 && (await Zs()).k < 1.9; i++) await page.mouse.wheel(0, -100);
+  const z = await Zs();
+  assert.ok(z.k > 1.4, '확대됨 ' + z.k);
+  // 새 PDF 를 빈 곳에 놓기 → 저장된 자리 = 보드 좌표 - 아이콘 반
+  const drop = { x: r.x + 560, y: r.y + 520 };
+  await dropFiles([{ name: 'zoom.pdf', buf: samplePaper('Zoom Drop Paper', 'Zed Zoom', 2025) }], drop.x, drop.y);
+  await page.waitForSelector(card('Zoom Drop Paper'));
+  const want = { x: Math.round((drop.x - r.x - z.tx) / z.k - 66), y: Math.round((drop.y - r.y - z.ty) / z.k - 75) };
+  const got = (await state()).papers.find((p) => p.title === 'Zoom Drop Paper').pos;
+  assert.ok(Math.abs(got.x - want.x) <= 1 && Math.abs(got.y - want.y) <= 1, JSON.stringify({ got, want }));
+  const c = await center(card('Zoom Drop Paper'));
+  assert.ok(Math.abs(c.x - drop.x) < 3 && Math.abs(c.y - drop.y) < 3, '놓은 자리에 보임');
+  // 빈 곳으로 화면에서 80px 끌면 보드에서는 80/k 만큼
+  await dragMouse(c, { x: c.x + 80, y: c.y - 40 });
+  await page.waitForTimeout(300);
+  const moved = (await state()).papers.find((p) => p.title === 'Zoom Drop Paper').pos;
+  assert.ok(Math.abs(moved.x - (got.x + 80 / z.k)) <= 1 && Math.abs(moved.y - (got.y - 40 / z.k)) <= 1, JSON.stringify({ moved, got, k: z.k }));
+  // 확대한 채로 다른 논문 위에 놓으면 링크
+  const before = (await state()).links.length;
+  const target = card('Legged Locomotion With MPC');
+  await page.click('#zoomFit');
+  await dragMouse(await center(card('Zoom Drop Paper')), await center(target));
+  await page.waitForFunction((n) => fetch('/api/state').then((r) => r.json()).then((s) => s.links.length === n), before + 1);
+  await shot('07b-zoomed');
+});
+
+test('스페이스 + 끌기 = 화면 이동 (선택 상자 안 생김)', async () => {
+  const z0 = await Zs();
+  const r = await page.locator('#board').boundingBox();
+  // 빈 곳 찾기: 오른쪽 위 끝
+  const p0 = { x: r.x + r.width - 30, y: r.y + 30 };
+  await page.keyboard.down('Space');
+  await dragMouse(p0, { x: p0.x - 120, y: p0.y + 60 });
+  await page.keyboard.up('Space');
+  const z1 = await Zs();
+  assert.ok(Math.abs(z1.tx - (z0.tx - 120)) < 1 && Math.abs(z1.ty - (z0.ty + 60)) < 1, JSON.stringify([z0, z1]));
+  assert.equal(await page.locator('#board .paper.picked').count(), 0);
+});
+
+test('여러 개 선택: 사각형으로 고르고 같이 옮김 · 다른 논문 위에 놓아도 링크 안 만듦 · 시프트 클릭 · Esc', async () => {
+  const A = await idOf('Legged Locomotion With MPC'), B = await idOf('Contact Implicit Planning'), C = await idOf('Scanned Old Paper'), D = await idOf('Zoom Drop Paper');
+  // 자리를 정해 두고 1배 · 원점으로
+  await fetch(base + '/api/papers/positions', { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ items: [
+    { id: A, pos: { x: 100, y: 100 } }, { id: B, pos: { x: 300, y: 100 } }, { id: C, pos: { x: 100, y: 400 } }, { id: D, pos: { x: 520, y: 400 } }] }) });
+  await page.evaluate(() => localStorage.setItem('po.boardZoom', JSON.stringify({ k: 1, tx: 0, ty: 0 })));
+  await page.reload();
+  await page.waitForSelector('#board .paper');
+  const linksBefore = (await state()).links.length;
+
+  await dragMouse(await boardAt(60, 60), await boardAt(470, 300));
+  assert.equal(await page.locator('#board .paper.picked').count(), 2);
+  await page.waitForSelector('#selInfo:not([hidden]):has-text("2편 선택")');
+  await shot('07c-marquee');
+
+  // A 를 C 위로 끌기 → A·B 가 같이 아래로 300, 링크는 그대로
+  await dragMouse(await boardAt(166, 175), await boardAt(166, 475));
+  await page.waitForTimeout(400);
+  const st = await state();
+  const pos = (id) => st.papers.find((p) => p.id === id).pos;
+  assert.deepEqual(pos(A), { x: 100, y: 400 });
+  assert.deepEqual(pos(B), { x: 300, y: 400 });
+  assert.deepEqual(pos(C), { x: 100, y: 400 }, '놓인 자리의 논문은 그대로');
+  assert.equal(st.links.length, linksBefore, '여러 개를 놓을 때는 링크 안 생김');
+  assert.equal(await page.locator('#board .paper.picked').count(), 2, '옮긴 뒤에도 선택 유지');
+
+  // 시프트 클릭으로 더하고 빼기
+  await page.click(card('Zoom Drop Paper'), { modifiers: ['Shift'] });
+  assert.equal(await page.locator('#board .paper.picked').count(), 3);
+  assert.equal(await page.isHidden('#popover'), true, '시프트 클릭은 메모 팝업을 안 엶');
+  await page.click(card('Zoom Drop Paper'), { modifiers: ['Meta'] });
+  assert.equal(await page.locator('#board .paper.picked').count(), 2);
+
+  // 여러 개를 라벨 위에 놓으면 모두에 붙음 (A 자리에는 C 가 겹쳐 위에 있으므로 B 를 잡음)
+  await dragMouse(await boardAt(366, 475), await center('#labelList li:has-text("로봇 보행")'));
+  await page.waitForTimeout(400);
+  const st2 = await state();
+  const lb = st2.labels.find((l) => l.name === '로봇 보행').id;
+  assert.ok([A, B].every((id) => st2.papers.find((p) => p.id === id).labels.includes(lb)));
+  assert.deepEqual(st2.papers.find((p) => p.id === A).pos, { x: 100, y: 400 }, '라벨에 놓으면 자리는 원래대로');
+
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#board .paper.picked').count(), 0);
+  // 다시 고른 뒤 빈 곳 클릭 = 풀기
+  await dragMouse(await boardAt(60, 360), await boardAt(470, 600));
+  assert.ok((await page.locator('#board .paper.picked').count()) >= 2);
+  const e = await boardAt(900, 120);
+  await page.mouse.click(e.x, e.y);
+  assert.equal(await page.locator('#board .paper.picked').count(), 0);
+  // 하나만 끌어 다른 논문 위에 놓기는 여전히 링크
+  await dragMouse(await boardAt(586, 475), await boardAt(366, 475));
+  await page.waitForFunction((n) => fetch('/api/state').then((r) => r.json()).then((s) => s.links.length === n), linksBefore + 1);
+});
+
+test('폰: 두 손가락 핀치로 확대 · 한 손가락으로 이동', async () => {
+  await page.evaluate(() => {
+    const bd = document.querySelector('#board');
+    const r = bd.getBoundingClientRect();
+    const ev = (type, id, x, y) => bd.dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: 'touch', isPrimary: id === 11, clientX: r.left + x, clientY: r.top + y, bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+    window.__z0 = { ...window.__board };
+    ev('pointerdown', 11, 700, 300);
+    ev('pointerdown', 12, 800, 300);
+    ev('pointermove', 12, 900, 300); // 손가락 사이 100 → 200
+    ev('pointerup', 12, 900, 300);
+    ev('pointerup', 11, 700, 300);
+  });
+  const [z0, z1] = await page.evaluate(() => [window.__z0, { ...window.__board }]);
+  assert.ok(Math.abs(z1.k / z0.k - 2) < 0.05, `핀치 두 배: ${z0.k} → ${z1.k}`);
+  await page.evaluate(() => {
+    const bd = document.querySelector('#board');
+    const r = bd.getBoundingClientRect();
+    const ev = (type, x, y) => bd.dispatchEvent(new PointerEvent(type, { pointerId: 21, pointerType: 'touch', isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+    window.__z0 = { ...window.__board };
+    ev('pointerdown', 900, 100);
+    ev('pointermove', 850, 140);
+    ev('pointerup', 850, 140);
+  });
+  const [a, b] = await page.evaluate(() => [window.__z0, { ...window.__board }]);
+  assert.ok(Math.abs(b.tx - (a.tx - 50)) < 1 && Math.abs(b.ty - (a.ty + 40)) < 1, '한 손가락 = 이동');
+  assert.equal(await page.locator('#board .paper.picked').count(), 0, '손가락 끌기는 선택 상자를 만들지 않음');
+  await page.click('#zoomReset');
+});
+
 test('그룹 만들기 → 트리에서 끌어다 넣기 · 연결 가지 펼치기', async () => {
   await page.click('[data-add="groups"]');
   await page.keyboard.type('보행 제어');

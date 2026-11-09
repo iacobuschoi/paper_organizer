@@ -251,3 +251,13 @@ test('정적 파일: gzip · ETag 304 · pdf.js 는 묵혀 둠', async () => {
   assert.equal((await fetch(base + '/app.js', { headers: { cookie, 'if-none-match': etag } })).status, 304);
   assert.equal((await fetch(base + '/app.js', { redirect: 'manual', headers: { 'if-none-match': etag } })).status, 302, 'ETag 가 있어도 로그인 먼저');
 });
+
+test('API: 보드 위치 한꺼번에 저장 · 이상한 값은 건너뜀 · 로그인 필요', async () => {
+  const ps = (await j('GET', '/api/state')).body.papers.slice(0, 2);
+  const r = await j('POST', '/api/papers/positions', { items: [{ id: ps[0].id, pos: { x: 10.6, y: 20 } }, { id: ps[1].id, pos: { x: 'a', y: 1 } }, { id: 'p-nope', pos: { x: 1, y: 1 } }] });
+  assert.equal(r.body.updated, 1);
+  const st = (await j('GET', '/api/state')).body;
+  assert.deepEqual(st.papers.find((p) => p.id === ps[0].id).pos, { x: 11, y: 20 });
+  const no = await fetch(base + '/api/papers/positions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"items":[]}' });
+  assert.equal(no.status, 401);
+});

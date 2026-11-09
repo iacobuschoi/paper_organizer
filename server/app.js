@@ -241,6 +241,12 @@ export function createApp({ dataDir, log = console }) {
         log.info(`[upload] ${fileName} → ${paper.id} ${duplicate ? '(이미 있음)' : ''} 경고 ${info.warnings.length}`);
         return send(res, duplicate ? 200 : 201, { paper, duplicate, link });
       }
+      if (id === 'positions' && m === 'POST') {
+        // 보드에서 여러 개를 옮겼을 때 한 번에 저장 (파일 쓰기 한 번)
+        const b = await readJson(req);
+        const items = Array.isArray(b.items) ? b.items.slice(0, 5000) : [];
+        return send(res, 200, { updated: store.setPositions(items) });
+      }
       if (id && !sub && m === 'PATCH') {
         const p = store.updatePaper(id, await readJson(req));
         if (!p) throw new HttpError(404, '없는 논문이에요');

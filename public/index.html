@@ -41,7 +41,17 @@
 
   <main id="main">
     <div id="filterBar" class="filter-bar" hidden></div>
-    <div id="board" class="view board" data-view="board"><div class="board-inner"><svg class="board-links"></svg></div></div>
+    <div id="board" class="view board" data-view="board">
+      <div class="board-inner"><svg class="board-links"></svg></div>
+      <div class="board-tools" role="toolbar" aria-label="보드 확대">
+        <button class="btn" id="zoomOut" title="축소" aria-label="축소">−</button>
+        <span id="zoomPct" class="zoom-pct" aria-live="polite">100%</span>
+        <button class="btn" id="zoomIn" title="확대" aria-label="확대">+</button>
+        <button class="btn" id="zoomReset" title="100% 로">원래 크기</button>
+        <button class="btn" id="zoomFit" title="모든 논문이 보이게">전체 보기</button>
+      </div>
+      <div id="selInfo" class="sel-info" hidden></div>
+    </div>
     <div id="tree" class="view tree" data-view="tree" hidden></div>
     <div id="graph" class="view graph" data-view="graph" hidden><svg></svg><div class="graph-tools"><button class="btn" id="graphFit">화면에 맞추기</button><label><input type="checkbox" id="graphGroups" checked> 그룹 색</label></div></div>
     <div id="empty" class="empty" hidden>
