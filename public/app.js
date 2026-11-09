@@ -37,6 +37,10 @@ async function api(method, url, body, opts = {}) {
     throw new Error('서버에 닿지 않아요');
   }
   $('#offline').hidden = true;
+  if (res.status === 401) {
+    location.href = '/login'; // 로그인이 끝났거나 풀림
+    throw new Error('로그인이 필요해요');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`);
   return data;
@@ -1128,6 +1132,11 @@ function render() {
 $$('.views button').forEach((b) => (b.onclick = () => { closePopover(true); S.view = b.dataset.view; localStorage.setItem('po.view', S.view); render(); }));
 $('#search').oninput = debounce((e) => { S.f.q = e.target.value.trim(); render(); }, 200);
 $$('[data-add]').forEach((b) => (b.onclick = () => addInline(b.dataset.add)));
+$('#logout').onclick = async () => {
+  editing?.flush();
+  await fetch('/api/logout', { method: 'POST' }).catch((e) => console.warn('[logout]', e.message));
+  location.href = '/login';
+};
 $('#sidebarToggle').onclick = () => {
   if (matchMedia('(max-width: 700px)').matches) document.body.classList.toggle('show-sidebar');
   else document.body.classList.toggle('no-sidebar');

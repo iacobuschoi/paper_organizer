@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>논문 정리 — 로그인</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="login-page">
+<form id="loginForm" class="login-box" autocomplete="on">
+  <img src="icon.svg" alt="" width="44" height="44">
+  <h1>논문 정리</h1>
+  <label for="pw">비밀번호</label>
+  <input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>
+  <input type="text" name="username" value="paper-organizer" autocomplete="username" hidden>
+  <button class="btn primary" type="submit">들어가기</button>
+  <p id="msg" class="login-msg" role="alert"></p>
+</form>
+<script type="module" src="login.js"></script>
+</body>
+</html>

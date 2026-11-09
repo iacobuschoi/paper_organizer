@@ -203,3 +203,14 @@ textarea.note:focus { outline: none; border-color: var(--accent); }
   body:not(.show-sidebar) aside#sidebar { display: none; }
   .top h1 { display: none; }
 }
+
+/* 로그인 */
+body.login-page { display: flex; align-items: center; justify-content: center; min-height: 100%; padding: 20px; overflow: auto; }
+.login-box { width: min(340px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 26px 24px; display: flex; flex-direction: column; gap: 10px; }
+.login-box img { align-self: center; }
+.login-box h1 { text-align: center; font-size: 20px; margin: 0 0 8px; }
+.login-box label { font-size: 13px; color: var(--muted); }
+.login-box input[type=password] { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); font-size: 16px; }
+.login-box input:focus { outline: none; border-color: var(--accent); }
+.login-box .btn { justify-content: center; padding: 10px; font-size: 15px; }
+.login-msg { min-height: 20px; margin: 0; color: var(--danger); font-size: 13.5px; }

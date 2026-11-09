@@ -1,10 +1,12 @@
 // HTTP 서버 — 의존성 없이 node:http. 정적 파일(public/) + JSON API + PDF 보내기.
 import http from 'node:http';
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from './store.js';
 import { extractPdfInfo } from './extract.js';
+import { Auth, readCookie, sessionCookie, clearCookie, clientIp } from './auth.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -20,6 +22,16 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+// 모든 응답에 붙는 보안 머리글. 인라인 style 속성을 쓰므로 style-src 에 'unsafe-inline'.
+const SECURITY_HEADERS = {
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'x-frame-options': 'DENY',
+};
+// 로그인 없이 열리는 것: 로그인 화면과 그 화면이 쓰는 파일만
+const PUBLIC_FILES = new Set(['/login', '/login.html', '/login.js', '/style.css', '/icon.svg']);
+
 class HttpError extends Error {
   constructor(status, msg) {
     super(msg);
@@ -31,6 +43,7 @@ function send(res, status, body, headers = {}) {
   const isBuf = Buffer.isBuffer(body);
   const data = isBuf || typeof body === 'string' ? body : JSON.stringify(body);
   res.writeHead(status, {
+    ...SECURITY_HEADERS,
     'content-type': isBuf ? 'application/octet-stream' : typeof body === 'string' ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     ...headers,
@@ -69,6 +82,7 @@ async function readJson(req) {
 function serveStatic(req, res, urlPath) {
   let rel = decodeURIComponent(urlPath);
   if (rel === '/') rel = '/index.html';
+  if (rel === '/login') rel = '/login.html';
   let file;
   if (rel.startsWith('/vendor/pdfjs/')) {
     file = path.join(ROOT, 'node_modules/pdfjs-dist', rel.slice('/vendor/pdfjs/'.length));
@@ -79,9 +93,47 @@ function serveStatic(req, res, urlPath) {
   }
   fs.stat(file, (err, st) => {
     if (err || !st.isFile()) return send(res, 404, '없음');
-    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-cache' });
+    const ext = path.extname(file);
+    const etag = `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+    // pdf.js 파일은 판이 바뀌면 경로도 같이 바뀌지 않으므로 하루만 묵힘. 앱 파일은 매번 ETag 로 확인.
+    const headers = {
+      ...SECURITY_HEADERS,
+      'content-type': MIME[ext] || 'application/octet-stream',
+      'cache-control': rel.startsWith('/vendor/') ? 'private, max-age=86400' : 'no-cache',
+      etag,
+      vary: 'Accept-Encoding',
+    };
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers);
+      return res.end();
+    }
+    // 글자 파일은 gzip — Funnel 길은 느려서 pdf.js(약 1.5MB)를 그대로 보내면 열람기가 수십 초 걸림
+    if (TEXT_EXT.has(ext) && /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))) {
+      gzipCached(file, etag)
+        .then((gz) => {
+          res.writeHead(200, { ...headers, 'content-encoding': 'gzip', 'content-length': gz.length });
+          res.end(req.method === 'HEAD' ? undefined : gz);
+        })
+        .catch((e) => {
+          console.error('[static] gzip 실패', file, e.message);
+          if (!res.headersSent) send(res, 500, '서버 오류');
+        });
+      return;
+    }
+    res.writeHead(200, { ...headers, 'content-length': st.size });
+    if (req.method === 'HEAD') return res.end();
     fs.createReadStream(file).pipe(res);
   });
+}
+
+const TEXT_EXT = new Set(['.html', '.js', '.mjs', '.css', '.svg', '.json']);
+const gzCache = new Map(); // file → { etag, gz }
+async function gzipCached(file, etag) {
+  const c = gzCache.get(file);
+  if (c && c.etag === etag) return c.gz;
+  const gz = zlib.gzipSync(await fs.promises.readFile(file), { level: 9 });
+  gzCache.set(file, { etag, gz });
+  return gz;
 }
 
 function sendPdf(req, res, store, id) {
@@ -91,6 +143,7 @@ function sendPdf(req, res, store, id) {
   const st = fs.statSync(file);
   const name = encodeURIComponent(p.fileName || id + '.pdf');
   const headers = {
+    ...SECURITY_HEADERS,
     'content-type': 'application/pdf',
     'accept-ranges': 'bytes',
     'content-disposition': `inline; filename*=UTF-8''${name}`,
@@ -113,13 +166,53 @@ function sendPdf(req, res, store, id) {
 
 export function createApp({ dataDir, log = console }) {
   const store = new Store(dataDir);
+  const auth = new Auth(dataDir, log);
+
+  // 로그인 · 로그아웃 · 확인. 이것들 말고는 전부 세션 쿠키가 있어야 한다.
+  async function authRoutes(req, res, url) {
+    const p = url.pathname;
+    if (p === '/api/health') return send(res, 200, { ok: true }), true;
+    if (p === '/api/login' && req.method === 'POST') {
+      const b = await readJson(req);
+      const ip = clientIp(req);
+      const r = auth.login(String(b.password || ''), ip);
+      if (!r.ok) {
+        log.warn(`[auth] 로그인 실패 ${ip} (${r.status})`);
+        await new Promise((ok) => setTimeout(ok, 400)); // 무작정 대입을 느리게
+        send(res, r.status, { error: r.error });
+        return true;
+      }
+      log.info(`[auth] 로그인 ${ip}`);
+      send(res, 200, { ok: true }, { 'set-cookie': sessionCookie(r.token, r.maxAge) });
+      return true;
+    }
+    if (p === '/api/logout' && req.method === 'POST') {
+      auth.logout(readCookie(req));
+      send(res, 200, { ok: true }, { 'set-cookie': clearCookie() });
+      return true;
+    }
+    if (p === '/api/me') return send(res, auth.valid(readCookie(req)) ? 200 : 401, { ok: auth.valid(readCookie(req)) }), true;
+    return false;
+  }
+
+  // 다른 사이트에서 보낸 쓰기 요청 막기 (SameSite 쿠키 위에 한 겹 더)
+  function sameOrigin(req) {
+    const origin = req.headers.origin;
+    if (!origin || req.method === 'GET' || req.method === 'HEAD') return true;
+    try {
+      const o = new URL(origin).host;
+      const hosts = [req.headers['x-forwarded-host'], req.headers.host].filter(Boolean).flatMap((h) => String(h).split(',').map((x) => x.trim()));
+      return hosts.includes(o);
+    } catch {
+      return false;
+    }
+  }
 
   async function api(req, res, url) {
     const parts = url.pathname.split('/').filter(Boolean).slice(1); // ['papers', id, ...]
     const m = req.method;
     const [res0, id, sub] = parts;
 
-    if (res0 === 'health') return send(res, 200, { ok: true, papers: store.db.papers.length });
     if (res0 === 'state' && m === 'GET') return send(res, 200, store.db);
 
     if (res0 === 'papers') {
@@ -199,6 +292,18 @@ export function createApp({ dataDir, log = console }) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     try {
+      if (!sameOrigin(req)) {
+        log.warn('[auth] 다른 출처의 쓰기 요청 막음', req.headers.origin, req.headers.host, req.headers['x-forwarded-host']);
+        throw new HttpError(403, '다른 사이트에서 온 요청이에요');
+      }
+      if (await authRoutes(req, res, url)) return;
+      if (!auth.valid(readCookie(req))) {
+        if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/vendor/')) throw new HttpError(401, '로그인이 필요해요');
+        if (!PUBLIC_FILES.has(url.pathname)) {
+          res.writeHead(302, { ...SECURITY_HEADERS, location: '/login', 'cache-control': 'no-store' });
+          return res.end();
+        }
+      }
       if (url.pathname.startsWith('/api/')) return await api(req, res, url);
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, '안 되는 요청이에요');
       return serveStatic(req, res, url.pathname);
@@ -209,5 +314,5 @@ export function createApp({ dataDir, log = console }) {
       else res.destroy(e);
     }
   });
-  return { server, store };
+  return { server, store, auth };
 }

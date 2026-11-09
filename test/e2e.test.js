@@ -6,15 +6,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { createApp } from '../server/app.js';
+import { setPassword } from '../server/auth.js';
 import { samplePaper, makePdf } from './makepdf.js';
 
 const SHOTS = process.env.SHOTS;
 
-let dir, server, base, browser, page;
+let dir, server, base, browser, page, cookie = '';
+const PW = 'e2e-password-5678';
 const errors = [];
 
 before(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'po-e2e-'));
+  setPassword(dir, PW);
   ({ server } = createApp({ dataDir: dir, log: { info() {}, warn() {}, error: console.error } }));
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
@@ -30,7 +33,7 @@ after(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 const shot = (name, p = page) => SHOTS && p.screenshot({ path: path.join(SHOTS, name + '.png') });
-const state = () => fetch(base + '/api/state').then((r) => r.json());
+const state = () => fetch(base + '/api/state', { headers: { cookie } }).then((r) => r.json());
 
 // 파일 끌어다 놓기를 흉내: 브라우저 안에서 DataTransfer 를 만들어 dragenter → dragover → drop
 async function dropFiles(files, x, y) {
@@ -57,6 +60,26 @@ async function dragMouse(from, to) {
   await page.mouse.up();
 }
 const card = (title) => `#board .paper:has(.ttl:text-is("${title}"))`;
+
+test('로그인: 안 하면 로그인 화면으로, 틀리면 안내, 맞으면 들어감', async () => {
+  await page.goto(base);
+  await page.waitForURL(/\/login$/);
+  await page.fill('#pw', 'wrong-password');
+  await page.click('button[type=submit]');
+  await page.waitForSelector('#msg:text("비밀번호가 틀렸어요")');
+  // 일부러 틀린 비밀번호의 401 은 브라우저가 콘솔에 "Failed to load resource" 로 찍는다 — 이 한 건만 뺀다
+  const i = errors.findIndex((e) => /401/.test(e));
+  assert.ok(i >= 0);
+  errors.splice(i, 1);
+  await shot('00-login');
+  await page.fill('#pw', PW);
+  await page.click('button[type=submit]');
+  await page.waitForURL(base + '/');
+  const c = (await page.context().cookies()).find((x) => x.name === 'po_session');
+  assert.ok(c, '세션 쿠키가 생김');
+  assert.equal(c.httpOnly, true);
+  cookie = `po_session=${c.value}`;
+});
 
 test('빈 화면 → PDF 끌어다 놓기 → 아이콘에 제목 · 저자 · 년도', async () => {
   await page.goto(base);
@@ -237,12 +260,12 @@ test('PDF 열람: 쪽이 그려지고 옆 칸에서 메모 편집', async () => 
   await page.keyboard.press('Escape');
   await page.waitForSelector('#viewer', { state: 'hidden' });
   assert.equal((await state()).papers.find((x) => x.title === 'Contact Implicit Planning').note, '열람하면서 쓴 메모');
-  const r = await fetch(base + '/api/papers/' + (await state()).papers[0].id + '/pdf');
+  const r = await fetch(base + '/api/papers/' + (await state()).papers[0].id + '/pdf', { headers: { cookie } });
   assert.equal(r.headers.get('content-type'), 'application/pdf');
 });
 
 test('다크 모드 · 좁은 화면에서도 글자가 보이고 오류 없음', async () => {
-  const ctx = await browser.newContext({ colorScheme: 'dark', viewport: { width: 375, height: 700 } });
+  const ctx = await browser.newContext({ colorScheme: 'dark', viewport: { width: 375, height: 700 }, storageState: await page.context().storageState() });
   const p2 = await ctx.newPage();
   const errs = [];
   p2.on('pageerror', (e) => errs.push(String(e)));
@@ -262,6 +285,14 @@ test('다크 모드 · 좁은 화면에서도 글자가 보이고 오류 없음'
   await p2.waitForSelector('#graph .node');
   assert.deepEqual(errs, []);
   await ctx.close();
+});
+
+test('로그아웃하면 다시 로그인 화면', async () => {
+  await page.click('#logout');
+  await page.waitForURL(/\/login$/);
+  await page.goto(base + '/');
+  await page.waitForURL(/\/login$/);
+  assert.equal((await fetch(base + '/api/state', { headers: { cookie } })).status, 401);
 });
 
 test('콘솔 오류 0', () => {

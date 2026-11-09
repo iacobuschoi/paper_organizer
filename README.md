@@ -25,12 +25,21 @@ npm install
 ```
 
 - 서버: `127.0.0.1:8790` (launchd `lab.paper-organizer`, 죽으면 다시 뜸, 로그 `~/Library/Logs/paper-organizer.log`)
-- 테일넷 주소: `https://<맥 MagicDNS 이름>:8443` — `tailscale serve` 가 HTTPS 를 붙여 테일넷 안에서만 연다.
-  로그인 없음 — 테일넷에 들어온 기기면 누구나 열고 고칠 수 있다.
+- 주소: `https://<맥 MagicDNS 이름>:8443` — `tailscale funnel` 로 **인터넷에 공개**(테일스케일 없이 아무 데서나).
+  테일넷 안에서만 쓰려면 `tailscale funnel --https=8443 off` 뒤 `tailscale serve --bg --https=8443 http://127.0.0.1:8790`.
+- **로그인:** 비밀번호 하나. `npm run set-password` 가 강한 비밀번호(20자)를 새로 만들어 한 번만 보여 주고,
+  scrypt 해시만 `DATA_DIR/auth.json`(권한 600)에 저장한다(저장소에는 없음). 바꾸면 기존 로그인은 모두 끊기고 서버 재시작은 필요 없다.
+  `PASSWORD='...' npm run set-password` 로 직접 정할 수도 있다(12자 이상).
+  - 세션 쿠키 `po_session`: HttpOnly · Secure · SameSite=Lax · 30일. 서버에는 토큰의 sha256 만 저장
+  - 실패 제한: 한 주소에서 15분에 5번 틀리면 15분 잠금, 전체로 1시간에 30번 틀리면 모든 로그인 15분 잠금
+  - 로그인 없이 열리는 것은 `/login` 화면(+ 그 css · js · 아이콘)과 `/api/health`(`{ok:true}` 만)뿐. 나머지 API · PDF 는 401, 화면은 `/login` 으로
+  - 다른 출처(Origin)에서 온 쓰기 요청은 403 · CSP · nosniff · frame 금지 머리글
+  - 비밀번호가 설정 안 돼 있으면 모든 요청을 막는다(열린 채로 뜨지 않음)
 - 데이터: `~/lab/paper-organizer-data/` (`DATA_DIR` 로 바꿈)
   - `db.json` 논문 · 메모 · 링크 · 라벨 · 체크 · 그룹 (임시 파일에 쓰고 rename)
   - `pdfs/<id>.pdf` 원본 · `trash/` 지운 논문의 PDF · `backups/db-날짜.json` 하루 한 번 사본(30일)
-- 멈추기: `launchctl bootout gui/$(id -u)/lab.paper-organizer` · 테일넷에서 내리기: `tailscale serve --https=8443 off`
+- 멈추기: `launchctl bootout gui/$(id -u)/lab.paper-organizer` · 공개 끄기: `tailscale funnel --https=8443 off`
+- Funnel 길은 느리다: 이 맥에서 공개 주소로 돌아 들어와 잰 값은 요청마다 약 2.5초 + 약 70KB/s(테일넷 안은 0.03초). 그래서 글자 파일은 gzip, pdf.js 는 하루 묵힘
 
 ## 시험
 

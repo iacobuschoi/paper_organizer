@@ -4,29 +4,35 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../server/app.js';
+import { setPassword, generatePassword } from '../server/auth.js';
 import { extractPdfInfo, firstAuthorFrom, yearFrom } from '../server/extract.js';
 import { makePdf, samplePaper } from './makepdf.js';
 
 const quiet = { info() {}, warn() {}, error: console.error };
-let dir, server, base, store;
+let dir, server, base, store, cookie;
+const PW = 'test-password-1234';
 
 before(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'po-test-'));
+  setPassword(dir, PW);
   ({ server, store } = createApp({ dataDir: dir, log: quiet }));
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
+  const r = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PW }) });
+  assert.equal(r.status, 200);
+  cookie = r.headers.get('set-cookie').split(';')[0];
 });
 after(() => {
   server.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-const j = async (method, url, body) => {
-  const r = await fetch(base + url, { method, headers: { 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
+const j = async (method, url, body, headers = {}) => {
+  const r = await fetch(base + url, { method, headers: { 'content-type': 'application/json', cookie, ...headers }, body: body && JSON.stringify(body) });
   return { status: r.status, body: await r.json() };
 };
 const upload = async (buf, name = 'x.pdf', q = '') => {
-  const r = await fetch(base + '/api/papers' + q, { method: 'POST', headers: { 'content-type': 'application/pdf', 'x-file-name': encodeURIComponent(name) }, body: buf });
+  const r = await fetch(base + '/api/papers' + q, { method: 'POST', headers: { 'content-type': 'application/pdf', 'x-file-name': encodeURIComponent(name), cookie }, body: buf });
   return { status: r.status, body: await r.json() };
 };
 
@@ -92,7 +98,7 @@ test('API: 올리기 → 고치기 → 링크 → 지우기', async () => {
   assert.equal(dup.body.existed, true);
   assert.equal((await j('POST', '/api/links', { a: a.body.paper.id, b: a.body.paper.id })).status, 400);
 
-  const pdf = await fetch(`${base}/api/papers/${a.body.paper.id}/pdf`, { headers: { range: 'bytes=0-4' } });
+  const pdf = await fetch(`${base}/api/papers/${a.body.paper.id}/pdf`, { headers: { range: 'bytes=0-4', cookie } });
   assert.equal(pdf.status, 206);
   assert.equal(await pdf.text(), '%PDF-');
 
@@ -129,15 +135,16 @@ test('API: 라벨 · 체크 · 그룹 만들고 붙이고 지우기, 그룹 순�
 });
 
 test('API: PDF 가 아닌 것 거절 · 이상한 경로 막기', async () => {
-  const r = await fetch(base + '/api/papers', { method: 'POST', headers: { 'content-type': 'application/pdf' }, body: 'hello' });
+  const r = await fetch(base + '/api/papers', { method: 'POST', headers: { 'content-type': 'application/pdf', cookie }, body: 'hello' });
   assert.equal(r.status, 415);
-  assert.equal((await fetch(base + '/api/papers/../../etc/passwd/pdf')).status, 404);
-  assert.equal((await fetch(base + '/api/papers/p-zzzz/pdf')).status, 404);
+  assert.equal((await fetch(base + '/api/papers/../../etc/passwd/pdf', { headers: { cookie } })).status, 404);
+  assert.equal((await fetch(base + '/api/papers/p-zzzz/pdf', { headers: { cookie } })).status, 404);
 });
 
 test('저장: db.json 이 망가졌으면 덮어쓰지 않고 멈춤', () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'po-broken-'));
   fs.writeFileSync(path.join(d, 'db.json'), '{ not json');
+  setPassword(d, PW);
   assert.throws(() => createApp({ dataDir: d, log: quiet }), /db\.json/);
   assert.equal(fs.readFileSync(path.join(d, 'db.json'), 'utf8'), '{ not json');
   fs.rmSync(d, { recursive: true, force: true });
@@ -150,4 +157,97 @@ test('API: 고치기 값 다듬기 — 이상한 pos · 숫자 제목도 안전�
   assert.equal(r.title, '42');
   assert.equal(r.note, '');
   assert.equal((await j('PATCH', `/api/papers/${p.id}`, { pos: 'nope' })).body.pos, null);
+});
+
+// ───────── 로그인 ─────────
+const raw = (url, opts = {}) => fetch(base + url, { redirect: 'manual', ...opts });
+
+test('로그인 없이: API · PDF · 화면은 막히고 로그인 화면만 열림', async () => {
+  const id = (await j('GET', '/api/state')).body.papers[0].id;
+  assert.equal((await raw('/api/state')).status, 401);
+  assert.equal((await raw(`/api/papers/${id}/pdf`)).status, 401);
+  assert.equal((await raw(`/api/papers/${id}`, { method: 'PATCH', body: '{}' })).status, 401);
+  assert.equal((await raw(`/api/papers/${id}`, { method: 'DELETE' })).status, 401);
+  assert.equal((await raw('/api/links', { method: 'POST', body: '{}' })).status, 401);
+  assert.equal((await raw('/api/labels', { method: 'POST', body: '{}' })).status, 401);
+  const up = await raw('/api/papers', { method: 'POST', headers: { 'content-type': 'application/pdf' }, body: samplePaper('Sneaky', 'X Y', 2020) });
+  assert.equal(up.status, 401);
+  assert.equal((await j('GET', '/api/state')).body.papers.some((p) => p.title === 'Sneaky'), false, '로그인 없이 올린 것은 저장 안 됨');
+  for (const pth of ['/', '/index.html', '/app.js', '/util.js']) {
+    const r = await raw(pth);
+    assert.equal(r.status, 302, pth);
+    assert.equal(r.headers.get('location'), '/login');
+  }
+  assert.equal((await raw('/vendor/pdfjs/legacy/build/pdf.min.mjs')).status, 401);
+  for (const pth of ['/login', '/login.js', '/style.css', '/icon.svg']) assert.equal((await raw(pth)).status, 200, pth);
+  assert.deepEqual(await (await raw('/api/health')).json(), { ok: true }, 'health 는 아무것도 드러내지 않음');
+  assert.equal((await raw('/api/state', { headers: { cookie: 'po_session=made-up-token' } })).status, 401);
+  assert.match((await raw('/login')).headers.get('content-security-policy'), /frame-ancestors 'none'/);
+});
+
+test('로그인: 쿠키는 HttpOnly · Secure · SameSite, 틀리면 401, 로그아웃하면 끊김', async () => {
+  const bad = await raw('/api/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.1' }, body: JSON.stringify({ password: 'nope' }) });
+  assert.equal(bad.status, 401);
+  assert.equal(bad.headers.get('set-cookie'), null);
+  const ok = await raw('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PW }) });
+  const sc = ok.headers.get('set-cookie');
+  assert.match(sc, /HttpOnly/);
+  assert.match(sc, /Secure/);
+  assert.match(sc, /SameSite=Lax/);
+  const c = sc.split(';')[0];
+  assert.equal((await raw('/api/state', { headers: { cookie: c } })).status, 200);
+  await raw('/api/logout', { method: 'POST', headers: { cookie: c } });
+  assert.equal((await raw('/api/state', { headers: { cookie: c } })).status, 401, '로그아웃한 쿠키는 못 씀');
+  const db = fs.readFileSync(path.join(dir, 'auth.json'), 'utf8');
+  assert.ok(!db.includes(PW), 'auth.json 에 비밀번호 원문 없음');
+  assert.ok(!db.includes(cookie.split('=')[1]), 'auth.json 에 세션 토큰 원문 없음');
+});
+
+test('로그인 실패 제한: 한 주소에서 5번 틀리면 맞는 비밀번호도 잠시 거절', async () => {
+  const h = { 'content-type': 'application/json', 'x-forwarded-for': '1.2.3.4, 203.0.113.9' };
+  for (let i = 0; i < 5; i++) assert.equal((await raw('/api/login', { method: 'POST', headers: h, body: JSON.stringify({ password: 'wrong' + i }) })).status, 401);
+  const locked = await raw('/api/login', { method: 'POST', headers: h, body: JSON.stringify({ password: PW }) });
+  assert.equal(locked.status, 429);
+  // 앞쪽 X-Forwarded-For 를 바꿔도(지어낸 주소) 마지막 주소(프록시가 붙인 것)로 묶임
+  const spoof = await raw('/api/login', { method: 'POST', headers: { ...h, 'x-forwarded-for': '9.9.9.9, 203.0.113.9' }, body: JSON.stringify({ password: PW }) });
+  assert.equal(spoof.status, 429);
+  const other = await raw('/api/login', { method: 'POST', headers: { ...h, 'x-forwarded-for': '198.51.100.7' }, body: JSON.stringify({ password: PW }) });
+  assert.equal(other.status, 200, '다른 주소는 그대로');
+});
+
+test('다른 사이트에서 온 쓰기 요청은 쿠키가 있어도 403', async () => {
+  const r = await raw('/api/labels', { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: 'https://evil.example' }, body: JSON.stringify({ name: 'evil' }) });
+  assert.equal(r.status, 403);
+  const same = await raw('/api/labels', { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: base }, body: JSON.stringify({ name: 'same-origin' }) });
+  assert.equal(same.status, 201);
+});
+
+test('비밀번호가 없으면 모두 막힘(열린 채로 뜨지 않음) · 다른 곳에서 바꾼 비밀번호는 바로 반영', async () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'po-nopw-'));
+  const { server: s2 } = createApp({ dataDir: d, log: quiet });
+  await new Promise((r) => s2.listen(0, '127.0.0.1', r));
+  const b2 = `http://127.0.0.1:${s2.address().port}`;
+  assert.equal((await fetch(b2 + '/api/state')).status, 401);
+  const l = await fetch(b2 + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: '' }) });
+  assert.equal(l.status, 503);
+  const npw = generatePassword();
+  assert.match(npw, /^[a-z2-9]{5}(-[a-z2-9]{5}){3}$/);
+  setPassword(d, npw); // 서버가 돌고 있는 중에 바꿈
+  const l2 = await fetch(b2 + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: npw }) });
+  assert.equal(l2.status, 200);
+  s2.close();
+  fs.rmSync(d, { recursive: true, force: true });
+  assert.throws(() => setPassword(dir, 'short'), /12자/);
+});
+
+test('정적 파일: gzip · ETag 304 · pdf.js 는 묵혀 둠', async () => {
+  const r = await fetch(base + '/vendor/pdfjs/legacy/build/pdf.worker.min.mjs', { headers: { cookie, 'accept-encoding': 'gzip' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-encoding'), 'gzip');
+  assert.ok(Number(r.headers.get('content-length')) < 600000, '압축됨: ' + r.headers.get('content-length'));
+  assert.match(r.headers.get('cache-control'), /max-age=86400/);
+  assert.ok((await r.text()).length > 1000000, '풀면 원래 크기');
+  const etag = (await fetch(base + '/app.js', { headers: { cookie } })).headers.get('etag');
+  assert.equal((await fetch(base + '/app.js', { headers: { cookie, 'if-none-match': etag } })).status, 304);
+  assert.equal((await fetch(base + '/app.js', { redirect: 'manual', headers: { 'if-none-match': etag } })).status, 302, 'ETag 가 있어도 로그인 먼저');
 });
